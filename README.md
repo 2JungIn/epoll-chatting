@@ -396,6 +396,7 @@ int recv_data(int fd, void *buf, const size_t n, int flag)
 {
     int n_recv;
     int offset = 0;
+    int retry = 0;
     while (offset < n)
     {
         if ((n_recv = (int)recv(fd, buf, n, flag)) < 0>)
