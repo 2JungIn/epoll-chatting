@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 
 #include <signal.h>
 #include <unistd.h>
@@ -19,8 +20,9 @@
 #include "../include/connection_list.h"
 
 #define DEFAULT_PORT         "56562"
-#define MAX_EVENT            64
-#define CLIENT_EVENT         ( EPOLLIN | EPOLLET )
+#define MAX_CONNECTION       20000 /* (socket_fd + timer_fd)*10000 */
+#define MAX_EVENT            4096
+#define CLIENT_EVENT         ( EPOLLIN | EPOLLET | EPOLLRDHUP )
 #define EPOLL_WAIT_TIMEOUT   1000 /* ms */
 
 /* 스레드 상테 */
@@ -63,6 +65,24 @@ int broadcast(int epfd, connection_list *conn_list, struct packet *p);
 
 int main(void)
 {
+    /* 런타임 파일기술자 개수 변경 */
+    struct rlimit rlimit;
+    if (getrlimit(RLIMIT_OFILE, &rlimit) < 0)
+        unix_error("getrlimit");
+    printf("rlim_cur: %ld, rlim_max: %ld\n", rlimit.rlim_cur, rlimit.rlim_max);
+    
+    if (rlimit.rlim_cur < MAX_CONNECTION)
+    {
+        rlimit.rlim_cur += MAX_CONNECTION;
+        if (setrlimit(RLIMIT_OFILE, &rlimit) < 0)
+            unix_error("setrlimit");
+
+        if (getrlimit(RLIMIT_OFILE, &rlimit) < 0)
+            unix_error("getrlimit");
+
+        printf("rlim_cur: %ld, rlim_max: %ld\n", rlimit.rlim_cur, rlimit.rlim_max);
+    }
+
     /* SIGPIPE 시그널 무시 */
     sigpipe_ignore();
 
@@ -95,7 +115,7 @@ int main(void)
         if (!strcmp(buffer, "/exit"))
             break;
 
-        printf("%s\n", buffer);
+        printf("connection count: %d\n", conn_list->count);
     }
 
     free(buffer);
@@ -176,7 +196,18 @@ void *epoll_worker(void *param)
             struct epoll_event *current = &ep_events[i];
             struct connection *conn = (struct connection *)current->data.ptr;
 
-            if (current->events & EPOLLIN)   /* EPOLLIN */
+            if (current->events & EPOLLRDHUP || current->events & EPOLLHUP)
+            {
+                pr_out("closeed by host (sfd=%d)", conn->socket_fd);
+
+                del_event(epfd, conn);
+                connection_list_delete(conn_list, conn);
+            }
+            else if (current->events & EPOLLERR)    /* EPOLLERR */
+            {
+                pr_err("EPOLLERR");
+            }   /* end if EPOLLERR */
+            else if (current->events & EPOLLIN)     /* EPOLLIN */
             {
                 if (current->data.fd == fd_listener)
                 {
@@ -193,11 +224,7 @@ void *epoll_worker(void *param)
             {
                 /* 클라이언트 소켓에서 송신 가능 이벤트 발생 */
                 send_event(epfd, conn);
-            }   /* end if EPOLLOUT */
-            else if (current->events & EPOLLERR)    /* EPOLLERR */
-            {
-                pr_err("EPOLLERR");
-            }   /* end if EPOLLERR */
+            }   /* end if EPOLLOUT */          
             else    /* Unkown */
             {
                 pr_out("UNKWON!");
@@ -336,16 +363,6 @@ int recv_event(int epfd, connection *conn)
     if (ioctl(conn->socket_fd, FIONREAD, &readable_byte) < 0)
         unix_error("ioctl( FIONREAD )");
 
-    if (readable_byte == 0)  /* 수신측에서 연결 종료 */
-    {
-        pr_out("closeed by host (sfd=%d)", conn->socket_fd);
-
-        del_event(epfd, conn);
-        connection_list_delete(conn_list, conn);
-
-        return 0;
-    }
-
     int n_recv = 0;
     while (readable_byte > 0)
     {
@@ -372,7 +389,17 @@ int recv_event(int epfd, connection *conn)
         }
     }  /* end if recv data */
 
-    connection_set_timer(conn);
+    if (n_recv > 0)
+    {
+        connection_set_timer(conn);
+    }
+    else
+    {
+        pr_out("closeed by host (sfd=%d)", conn->socket_fd);
+
+        del_event(epfd, conn);
+        connection_list_delete(conn_list, conn);
+    }
 
     return n_recv;
 }
@@ -382,21 +409,16 @@ int send_event(int epfd, connection *conn)
     int n_send = 0;
     while (!send_queue_empty(conn) && (n_send = send_packet(conn)) > 0);
 
-    /* 송신할 패킷이 없음 */
-    if (send_queue_empty(conn))
-    {
-        mod_event(epfd, conn, CLIENT_EVENT);
-        return 0;
-    }
-
-    if (n_send == 0)
+    if (n_send < 0)
     {
         pr_out("closeed by host (sfd=%d)", conn->socket_fd);
 
         del_event(epfd, conn);
         connection_list_delete(conn_list, conn);
-
-        return 0;
+    }
+    else if (send_queue_empty(conn))    /* 송신할 패킷이 없음 */
+    {
+        mod_event(epfd, conn, CLIENT_EVENT);
     }
 
     return n_send;
@@ -430,18 +452,16 @@ int recv_complete(int epfd, connection *conn)
     struct header *h = (struct header *)raw_data;
     if (h->type == HEARTBEAT)
     {
-        struct message *m = (struct message *)(raw_data + sizeof(struct header));
-        pr_out("client(%d) heartbeat: %*s", conn->socket_fd, (int)m->msg_length, m->msg);
+        /* do nothing */
     }
     else if (h->type == CHAT_MSG)
     {
         /* broadcast */
-        struct message *m = (struct message *)(raw_data + sizeof(struct header));
-        pr_out("client(%d) message: %*s", conn->socket_fd, (int)m->msg_length, m->msg);
         broadcast(epfd, conn_list, conn->recv_packet);
     }
-    else    /* Unkown */
+    else
     {
+        /* Unkown */
         print_byte(conn->recv_packet->data, conn->recv_packet->data_size);
     }
 

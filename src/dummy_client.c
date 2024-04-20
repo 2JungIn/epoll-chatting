@@ -5,6 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <sys/stat.h>
+#include <sys/types.h>
+
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "../include/utils.h"
@@ -29,6 +33,7 @@ typedef struct thread_arg
     void *(*start_routine)(void *);   /* 스레드 작업 함수 */
 } thread_arg;
 
+int state;
 
 struct worker_queue *send_queue;
 struct worker_queue *msg_queue;
@@ -50,8 +55,65 @@ int check_thread(const thread_arg *args, const int n);
 void send_heartbeat(union sigval arg);
 
 
-int main(void)
+/* 시그널 핸들러 함수 */
+void signal_handler(int signo)
 {
+    if (signo == SIGUSR1)   /* 프로그램 종료 */
+        state = (state == STOP ? RUNNING : STOP);
+    else
+        printf("signo: %d\n", signo);
+}
+
+
+int main(int argc, char *argv[])
+{
+    int is_send = 0;
+    if (argc != 3)
+    {
+        fprintf(stderr, "%s <log file name> <send | listen>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+    
+    if (!strcmp(argv[2], "send"))
+    {
+        is_send = 1;
+    }
+    else if (!strcmp(argv[2], "listen"))
+    {
+        is_send = 0;
+    }
+    else
+    {
+        fprintf(stderr, "%s <log file name> <send | listen>\n", argv[0]);
+        exit(EXIT_FAILURE);    
+    }
+
+    /* 시그널 핸들러 설치 */
+    struct sigaction sa;
+    sa.sa_handler = signal_handler;
+    if (sigemptyset(&sa.sa_mask) < 0)
+        unix_error("sigemptyset");
+    sa.sa_flags = SA_RESTART;
+    
+    if (sigaction(SIGUSR1, &sa, NULL) < 0)
+        unix_error("sigaction");
+    
+    int fd = -1;
+    if (!strcmp(argv[1], "NULL"))
+    {
+        printf("PID(%d)\n", getpid());
+        printf("start & exit command: kill -SIGUSR1 %d\n", getpid());
+    }
+    else
+    {
+        if ((fd = open(argv[1], O_CREAT | O_TRUNC | O_RDWR, 0644)) < 0)
+            unix_error("open");
+        
+        /* 출력을 로그파일로 리다이렉트 */
+        if (dup2(fd, STDOUT_FILENO) < 0)
+            unix_error("dup2");
+    }
+
     int sd = connect_server("127.0.0.1", "56562");
 
     /* 스레드 생성 */
@@ -68,27 +130,18 @@ int main(void)
     timer_t heartbeat_timer = make_timer(INTERVAL_DELAY, INTERVAL, send_heartbeat);
     
     /* main logic */
-    char *input = NULL;
-    size_t len_input = MAX_MSG_LENGTH;
-    int ret_line;
-    while (check_thread(args, n))
+    pause();
+
+    while (state == RUNNING && check_thread(args, n))
     {
-        if ((ret_line = getline_timeout(&input, &len_input, stdin, GETLINE_TIMEOUT)) < 0)
+        if (is_send == 1)
         {
-            if (errno)
-                unix_error("getline");
+            struct message *m = dummy_message();
+            worker_queue_push(send_queue, msg_packet(m->msg, m->msg_length));
+            free(m);
         }
-        else
-        {
-            input[ret_line - 1] = '\0';    /* '\n' 제거 */
-            if (!strcmp(input, "/exit"))
-                break;
-
-            worker_queue_push(send_queue, msg_packet(input, ret_line));
-        }
+        sleep(1);
     }
-
-    free(input);
 
     /* 타이머 제거 */
     delete_timer(heartbeat_timer);
@@ -96,6 +149,8 @@ int main(void)
     /* 스레드 클린업 */
     thread_cleanup(args, n);
     close(sd);
+    if (fd > 0)
+        close(fd);
 
     exit(EXIT_SUCCESS);
 }

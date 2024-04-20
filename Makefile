@@ -16,7 +16,7 @@ OBJS += $(OBJ_DIR)/connection_list.o
 OBJS += $(OBJ_DIR)/worker_queue.o
 
 
-all: $(OBJS) server client
+all: $(OBJS) server client connect_test dummy_client stress
 
 # utils
 $(OBJ_DIR)/utils.o: $(SRC_DIR)/utils.c
@@ -67,7 +67,19 @@ server: $(SRC_DIR)/server.c
 client: $(SRC_DIR)/client.c
 	$(CC) $(CFLAGS) -o client $(SRC_DIR)/client.c $(OBJS)
 
+connect_test: $(SRC_DIR)/connect_test.c
+	$(CC) $(CFLAGS) -o connect_test $(SRC_DIR)/connect_test.c $(OBJS)
+
+dummy_client: $(SRC_DIR)/dummy_client.c
+	$(CC) $(CFLAGS) -o dummy_client $(SRC_DIR)/dummy_client.c $(OBJS)
+
+stress: stress.c
+	$(CC) $(CFLAGS) -o stress stress.c
+
 clean:
 	rm -rf $(OBJS)
 	rm -rf server
 	rm -rf client
+	rm -rf connect_test
+	rm -rf dummy_client
+	rm -rf stress

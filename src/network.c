@@ -8,7 +8,6 @@
 #include <string.h>
 
 #include <sys/socket.h>
-#include <sys/select.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -83,7 +82,7 @@ int recv_data(int fd, void *buf, size_t n, int flag)
     int retry_cnt = 0;
     while (1)
     {
-        if ((n_recv = recv(fd, buf, n, flag)) < 0)
+        if ((n_recv = (int)recv(fd, buf, n, flag)) < 0)
         {
             if (errno == EINTR)
             {
@@ -119,7 +118,7 @@ int send_data(int fd, const void *buf, size_t n, int flag)
     int retry_cnt = 0;
     while (1)
     {
-        if ((n_send = send(fd, buf, n, flag)) < 0)
+        if ((n_send = (int)send(fd, buf, n, flag)) < 0)
         {
             if (errno == EINTR)
             {
@@ -148,33 +147,6 @@ int send_data(int fd, const void *buf, size_t n, int flag)
 
     return n_send;
 }
-
-
-/* 타임아웃이 가능한 recv 함수 */
-int recv_timeout(int fd, void *buffer, size_t n, int flags, int timeout_ms)
-{
-    /**
-     * 1s = 1000 ms = 1000000us
-    **/
-    long sec = timeout_ms / 1000;
-    long usec = (timeout_ms % 1000) * 1000;
-    
-    fd_set set;
-
-    FD_ZERO(&set);
-    FD_SET(fd, &set);
-    
-    struct timeval tv = { .tv_sec = sec, .tv_usec = usec };
-    
-    if (select(fd + 1, &set, NULL, NULL, &tv) < 0)
-        perror("select");
-    
-    if (FD_ISSET(fd, &set))
-        return recv_data(fd, buffer, n, flags);
-
-    return -1;  /* time out */
-}
-
 
 
 int make_listen_socket(const char *host, const char *port)

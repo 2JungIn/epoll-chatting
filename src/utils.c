@@ -5,6 +5,18 @@
 #include <string.h>
 #include <time.h>
 
+static int range_random(const int from, const int to)
+{
+    if (from > to)
+        return -1;
+    /**
+     * rand() % (b - a + 1) -> 0 ~ (b-a) ... (1)
+     * (1) + a -> a ~ b
+    **/
+    return (rand() % (to - from + 1)) + from;
+}
+
+
 void unix_error(const char *msg)
 {
     perror(msg);
@@ -46,4 +58,26 @@ char *date(void)
     }
 
     return buffer;
+}
+
+/* dummy client */
+struct message *dummy_message(void)
+{
+    int msg_length = range_random(1, MAX_MSG_LENGTH);
+
+    size_t allocate_size = sizeof(struct message) + msg_length;
+    struct message *m = (struct message *)malloc(allocate_size);
+
+    m->msg_length = msg_length;
+    int i;
+    for (i = 0; i < msg_length - 1; i++)
+    {
+        if (rand() & 1) /* rnad() % 2 == 1*/
+            m->msg[i] = (char)range_random((int)'A', (int)'Z');
+        else
+            m->msg[i] = (char)range_random((int)'a', (int)'z');
+    }
+    m->msg[i] = '\0';
+
+    return m;
 }
